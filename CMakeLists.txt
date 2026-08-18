@@ -33,13 +33,20 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     message(FATAL_ERROR "Unsupported Linux architecture: ${CMAKE_SYSTEM_PROCESSOR}")
   endif()
 elseif(CMAKE_SYSTEM_NAME STREQUAL "Darwin")
-  message(FATAL_ERROR "mujoco_vendor: macOS (Darwin) is not supported!.")
+  # macOS ships a .dmg universal2 framework (verified upstream); handled below.
+  set(MUJOCO_ASSET_NAME "mujoco-${MUJOCO_VERSION}-macos-universal2.dmg")
+  set(MUJOCO_IS_DMG TRUE)
 elseif(CMAKE_SYSTEM_NAME STREQUAL "Windows")
   set(MUJOCO_ASSET_NAME "mujoco-${MUJOCO_VERSION}-windows-x86_64.zip")
 else()
   message(FATAL_ERROR "Unsupported operating system: ${CMAKE_SYSTEM_NAME}")
 endif()
 
+if(APPLE)
+  set(MUJOCO_LIBNAME "libmujoco.dylib")
+else()
+  set(MUJOCO_LIBNAME "libmujoco.so")
+endif()
 set(MUJOCO_ASSET_URL "${MUJOCO_DOWNLOAD_URL}/${MUJOCO_ASSET_NAME}")
 
 message(STATUS "Downloading MuJoCo prebuilt binary: ${MUJOCO_ASSET_NAME}")
@@ -48,22 +55,48 @@ if(CMAKE_VERSION VERSION_GREATER_EQUAL "3.24")
   set(_mujoco_timestamp DOWNLOAD_EXTRACT_TIMESTAMP TRUE)
 endif()
 
-FetchContent_Declare(
-  mujoco_binary
-  URL "${MUJOCO_ASSET_URL}"
-  ${_mujoco_timestamp}
-)
-FetchContent_MakeAvailable(mujoco_binary)
+set(MUJOCO_ROOT_DIR "${CMAKE_BINARY_DIR}/mujoco_prebuilt_${MUJOCO_VERSION}")
+if(MUJOCO_IS_DMG)
+  # macOS: download the .dmg, mount it, and extract the framework's Headers +
+  # dylib into the same include/lib layout the tar.gz path produces; then rewrite
+  # the dylib install name (framework path -> @rpath) so it is self-consistent in
+  # lib/. Locally validated end-to-end against the 3.4.0 universal2 DMG.
+  if(NOT EXISTS "${MUJOCO_ROOT_DIR}/lib/${MUJOCO_LIBNAME}")
+    set(_mj_dmg "${CMAKE_BINARY_DIR}/mujoco.dmg")
+    file(DOWNLOAD "${MUJOCO_ASSET_URL}" "${_mj_dmg}" SHOW_PROGRESS)
+    set(_mj_mnt "${CMAKE_BINARY_DIR}/mjmnt")
+    file(MAKE_DIRECTORY "${MUJOCO_ROOT_DIR}/include/mujoco" "${MUJOCO_ROOT_DIR}/lib")
+    execute_process(COMMAND hdiutil attach "${_mj_dmg}" -nobrowse -mountpoint "${_mj_mnt}" RESULT_VARIABLE _mj_att)
+    if(NOT _mj_att EQUAL 0)
+      message(FATAL_ERROR "mujoco_vendor: failed to mount ${_mj_dmg}")
+    endif()
+    file(GLOB _mj_hdrs "${_mj_mnt}/mujoco.framework/Headers/*.h")
+    file(COPY ${_mj_hdrs} DESTINATION "${MUJOCO_ROOT_DIR}/include/mujoco")
+    file(GLOB _mj_dylib "${_mj_mnt}/mujoco.framework/Versions/A/libmujoco.*.dylib")
+    file(COPY ${_mj_dylib} DESTINATION "${MUJOCO_ROOT_DIR}/lib")
+    if(EXISTS "${_mj_mnt}/model")
+      file(COPY "${_mj_mnt}/model" DESTINATION "${MUJOCO_ROOT_DIR}")
+    endif()
+    execute_process(COMMAND hdiutil detach "${_mj_mnt}")
+    file(GLOB _mj_lib "${MUJOCO_ROOT_DIR}/lib/libmujoco.*.dylib")
+    get_filename_component(_mj_libfile "${_mj_lib}" NAME)
+    execute_process(COMMAND install_name_tool -id "@rpath/${_mj_libfile}" "${_mj_lib}")
+    execute_process(COMMAND ${CMAKE_COMMAND} -E create_symlink "${_mj_libfile}" "${MUJOCO_ROOT_DIR}/lib/libmujoco.dylib")
+  endif()
+else()
+  FetchContent_Declare(
+    mujoco_binary
+    URL "${MUJOCO_ASSET_URL}"
+    ${_mujoco_timestamp}
+  )
+  FetchContent_MakeAvailable(mujoco_binary)
+endif()
 
 # Copy the FetchContent download to a stable, version-named directory in the
 # build tree so that cmake_install.cmake does not reference the
 # FetchContent-internal _deps/ path, which may not exist when cmake re-checks
 # the build system during the Debian dh_auto_install step.
 # The version suffix ensures a fresh copy whenever MUJOCO_VERSION changes.
-set(MUJOCO_ROOT_DIR "${CMAKE_BINARY_DIR}/mujoco_prebuilt_${MUJOCO_VERSION}")
-if(NOT EXISTS "${MUJOCO_ROOT_DIR}")
-  file(COPY "${mujoco_binary_SOURCE_DIR}/" DESTINATION "${MUJOCO_ROOT_DIR}")
-endif()
 set(MUJOCO_INSTALL_DIR "${CMAKE_INSTALL_PREFIX}/opt/${PROJECT_NAME}")
 
 # Install prebuilt binaries (copy actual files, resolve symlinks)
@@ -126,14 +159,16 @@ install(CODE "
 add_library(mujoco INTERFACE)
 # add alias mujoco::mujoco mujoco
 add_library(mujoco::mujoco ALIAS mujoco)
-add_dependencies(mujoco mujoco_binary)
+if(NOT MUJOCO_IS_DMG)
+  add_dependencies(mujoco mujoco_binary)
+endif()
 target_include_directories(mujoco INTERFACE
   $<BUILD_INTERFACE:${MUJOCO_ROOT_DIR}/include>
   $<INSTALL_INTERFACE:opt/${PROJECT_NAME}/include>
 )
 target_link_libraries(mujoco INTERFACE
-  $<BUILD_INTERFACE:${MUJOCO_ROOT_DIR}/lib/libmujoco.so>
-  $<INSTALL_INTERFACE:opt/${PROJECT_NAME}/lib/libmujoco.so>
+  $<BUILD_INTERFACE:${MUJOCO_ROOT_DIR}/lib/${MUJOCO_LIBNAME}>
+  $<INSTALL_INTERFACE:opt/${PROJECT_NAME}/lib/${MUJOCO_LIBNAME}>
 )
 
 install(TARGETS mujoco
