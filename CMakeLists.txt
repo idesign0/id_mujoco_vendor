@@ -198,6 +198,24 @@ install(FILES ${lodepng_SOURCE_DIR}/lodepng.h DESTINATION opt/${PROJECT_NAME}/in
 # Setup the simulate library for mujoco_ros2_control
 find_package(glfw3 REQUIRED)
 
+# The Linux/Windows release tarballs ship the `simulate/` sample sources, but the
+# macOS framework .dmg ships only the compiled framework (lib + headers). Fetch the
+# matching-version simulate sources from the MuJoCo source so mujoco_simulate can be
+# built on macOS as well.
+if(NOT EXISTS "${MUJOCO_ROOT_DIR}/simulate/simulate.cc"
+   AND NOT EXISTS "${MUJOCO_ROOT_DIR}/include/simulate/simulate.cc")
+  FetchContent_Declare(mujoco_simulate_src
+    URL "https://github.com/google-deepmind/mujoco/archive/refs/tags/${MUJOCO_VERSION}.tar.gz"
+    ${_mujoco_timestamp}
+  )
+  FetchContent_GetProperties(mujoco_simulate_src)
+  if(NOT mujoco_simulate_src_POPULATED)
+    FetchContent_Populate(mujoco_simulate_src)
+  endif()
+  file(COPY "${mujoco_simulate_src_SOURCE_DIR}/simulate/"
+       DESTINATION "${MUJOCO_ROOT_DIR}/simulate")
+endif()
+
 set(_SIM_DIR "${MUJOCO_ROOT_DIR}/simulate")
 if(NOT EXISTS "${_SIM_DIR}/simulate.h")
   set(_SIM_DIR "${MUJOCO_ROOT_DIR}/include/simulate")
@@ -209,6 +227,18 @@ add_library(mujoco_simulate STATIC
   ${_SIM_DIR}/glfw_dispatch.cc
   ${_SIM_DIR}/simulate.cc
 )
+# macOS: the simulate GUI uses Objective-C++ backends (CoreVideo display link +
+# Cocoa window glue) and links those frameworks — mirrors upstream
+# simulate/CMakeLists.txt's APPLE branch. Without these the .cc above under-link.
+if(APPLE)
+  target_sources(mujoco_simulate PRIVATE
+    ${_SIM_DIR}/glfw_corevideo.mm
+    ${_SIM_DIR}/macos_gui.mm
+  )
+  set_source_files_properties(${_SIM_DIR}/glfw_corevideo.mm
+    PROPERTIES COMPILE_FLAGS -Wno-deprecated-declarations)
+  target_link_libraries(mujoco_simulate PUBLIC "-framework CoreVideo" "-framework Cocoa")
+endif()
 set_target_properties(mujoco_simulate PROPERTIES POSITION_INDEPENDENT_CODE ON)
 target_include_directories(mujoco_simulate PUBLIC
   $<BUILD_INTERFACE:${_SIM_DIR}>
