@@ -8,10 +8,19 @@ set(MUJOCO_BIN_DIR      "${MUJOCO_VENDOR_ROOT}/bin")
 set(MUJOCO_PLUGIN_DIR   "${MUJOCO_VENDOR_ROOT}/bin/mujoco_plugin")
 set(MUJOCO_SIMULATE_DIR "${MUJOCO_VENDOR_ROOT}/include/simulate")
 
+# The build installs libmujoco.dylib on macOS (a symlink to the versioned dylib copied
+# out of the MuJoCo framework) and libmujoco.so elsewhere; the imported location must match
+# or downstream links fail with "No rule to make target .../libmujoco.so".
+if(APPLE)
+  set(_mujoco_vendor_libname "libmujoco.dylib")
+else()
+  set(_mujoco_vendor_libname "libmujoco.so")
+endif()
+
 if(NOT TARGET mujoco::mujoco)
   add_library(mujoco::mujoco SHARED IMPORTED)
   set_target_properties(mujoco::mujoco PROPERTIES
-    IMPORTED_LOCATION "${MUJOCO_LIB_DIR}/libmujoco.so"
+    IMPORTED_LOCATION "${MUJOCO_LIB_DIR}/${_mujoco_vendor_libname}"
     INTERFACE_INCLUDE_DIRECTORIES "${MUJOCO_INCLUDE_DIR}"
     INTERFACE_LINK_OPTIONS "LINKER:-rpath,${MUJOCO_LIB_DIR}"
   )
